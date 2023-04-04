@@ -13,8 +13,8 @@
 using namespace std;
 
 // CONSTANTS
-static const string INPUT_DIRECTORY = "input";
-static const string OUTPUT_DIRECTORY = "output";
+static const string INPUT_DIRECTORY = "../input";
+static const string OUTPUT_DIRECTORY = "../output";
 static const int FILTER_SIZE = 5;
 static const int NUM_CHANNELS = 3;
 
@@ -77,6 +77,17 @@ void write_image(const string &filename, const image_t &image)
 }
 
 
+int average(const single_channel_image_t &image, int point_x, int point_y, int filter_size) {
+    int pad = filter_size / 2;
+    int accumulator = 0;
+    for (int i = point_x - pad; i < point_x + pad; i++) {
+        for (int j = point_y - pad; j < point_y + pad; j++){
+            accumulator += image[i][j];
+        }
+    }
+    return accumulator / (filter_size * filter_size);
+}
+
 single_channel_image_t apply_box_blur(const single_channel_image_t &image, const int filter_size)
 {
     // Get the dimensions of the input image
@@ -89,7 +100,24 @@ single_channel_image_t apply_box_blur(const single_channel_image_t &image, const
     // Calculate the padding size for the filter
     int pad = filter_size / 2;
 
-    // YOUR CODE HERE
+    //Percorre a matriz 
+    for (int i = pad; i < height - pad; i++) {
+        for (int j = pad; j < width - pad; j++) {
+            result[i][j] = average(image, i, j, filter_size);
+        }
+    }
+    for (int i = 0; i < pad; i++){
+        for(int j = 0; j < width; j++){
+            result[i][j] = image[i][j];
+            result[height - i - 1][j] = image[height - i - 1][j];
+        }
+    }
+        for (int i = 0; i < height; i++){
+        for(int j = 0; j < pad; j++){
+            result[i][j] = image[i][j];
+            result[i][width - j - 1] = image[i][width - j - 1];
+        }
+    }
 
     return result;
 }
