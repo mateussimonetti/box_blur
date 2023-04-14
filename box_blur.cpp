@@ -4,6 +4,10 @@
 #include <filesystem>
 #include <chrono>
 #include <thread>
+#include <condition_variable>
+#include <mutex>
+#include <array>
+#include <cassert>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -12,13 +16,44 @@
 
 using namespace std;
 
+//stds
+std::mutex m;
+std::condition_variable space_available;
+std::condition_variable data_available;
+
+
 // CONSTANTS
 static const string INPUT_DIRECTORY = "../input";
 static const string OUTPUT_DIRECTORY = "../output";
 static const int FILTER_SIZE = 5;
 static const int NUM_CHANNELS = 3;
+static const unsigned NUM_PRODUCERS = 1;
+static const unsigned NUM_CONSUMERS = 10;
 
-// Image type definition
+static const unsigned BUFFER_SIZE = 1000;
+string buffer[BUFFER_SIZE];
+static unsigned counter = 0;
+unsigned in = 0, out = 0;
+
+void add_buffer(string i)
+{
+  buffer[in] = i;
+  in = (in+1) % BUFFER_SIZE;
+  counter++;
+}
+
+string get_buffer()
+{
+  string v;
+  v = buffer[out];
+  out = (out+1) % BUFFER_SIZE;
+  counter--;
+  return v;
+}
+
+static const unsigned SLEEP_TIME = 0; // ms
+
+
 typedef vector<vector<uint8_t>> single_channel_image_t;
 typedef array<single_channel_image_t, NUM_CHANNELS> image_t;
 
@@ -122,7 +157,18 @@ single_channel_image_t apply_box_blur(const single_channel_image_t &image, const
     return result;
 }
 
-int main(int argc, char *argv[])
+void ProcessImage(string &input_image_path) {
+    image_t input_image = load_image(input_image_path);
+    image_t output_image;
+    for (int i = 0; i < NUM_CHANNELS; ++i)
+    {
+        output_image[i] = apply_box_blur(input_image[i], FILTER_SIZE);
+    }
+    string output_image_path = input_image_path.replace(input_image_path.find(INPUT_DIRECTORY), INPUT_DIRECTORY.length(), OUTPUT_DIRECTORY);
+    write_image(output_image_path, output_image);
+}
+
+int producer_func()
 {
     if (!filesystem::exists(INPUT_DIRECTORY))
     {
@@ -144,23 +190,65 @@ int main(int argc, char *argv[])
         cerr << "Error there is a file named " << OUTPUT_DIRECTORY << ", it should be a directory" << endl;
         return 1;
     }
-
-    auto start_time = chrono::high_resolution_clock::now();
-    for (auto &file : filesystem::directory_iterator{INPUT_DIRECTORY})
-    {
-        string input_image_path = file.path().string();
-        clog << "Processing image: " << input_image_path << endl;
-        image_t input_image = load_image(input_image_path);
-        image_t output_image;
-        for (int i = 0; i < NUM_CHANNELS; ++i)
+	while (true)		
+	{
+        auto start_time = chrono::high_resolution_clock::now();
+        for (auto &file : filesystem::directory_iterator{INPUT_DIRECTORY})
         {
-            output_image[i] = apply_box_blur(input_image[i], FILTER_SIZE);
+            string input_image_path = file.path().string();
+            std::unique_lock<std::mutex> lock(m);
+            while (counter == BUFFER_SIZE)
+            {			
+                space_available.wait(lock); 
+            }
+            add_buffer(input_image_path);
         }
-        string output_image_path = input_image_path.replace(input_image_path.find(INPUT_DIRECTORY), INPUT_DIRECTORY.length(), OUTPUT_DIRECTORY);
-        write_image(output_image_path, output_image);
+		data_available.notify_one();
+		if (SLEEP_TIME > 0)
+			std::this_thread::sleep_for(std::chrono::milliseconds(SLEEP_TIME));
+		assert(counter <= BUFFER_SIZE);
+	}
+}
+
+// Consumer
+void consumer_func(const unsigned id)
+{
+	while (true)
+	{
+		std::unique_lock<std::mutex> lock(m);
+		
+		while (counter == 0)
+		{
+			data_available.wait(lock);
+		}
+
+		string i = get_buffer();
+        ProcessImage(i);
+
+		space_available.notify_one();
+		if (SLEEP_TIME > 0)
+			std::this_thread::sleep_for(std::chrono::milliseconds(SLEEP_TIME));
+
+		assert(counter >= 0);
     }
-    auto end_time = chrono::high_resolution_clock::now();
-    auto elapsed_time = chrono::duration_cast<chrono::milliseconds>(end_time - start_time);
-    cout << "Elapsed time: " << elapsed_time.count() << " ms" << endl;
+}
+
+// Image type definition
+
+
+int main(int argc, char *argv[])
+{
+    vector<thread> producers;
+	vector<thread> consumers;
+
+	for (unsigned i =0; i < NUM_PRODUCERS; ++i)
+	{
+		producers.push_back(thread(producer_func));
+	}
+	for (unsigned i =0; i < NUM_CONSUMERS; ++i)
+	{
+		consumers.push_back(thread(consumer_func, i));
+	}
+	consumers[0].join();
     return 0;
 }
