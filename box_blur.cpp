@@ -8,6 +8,7 @@
 #include <mutex>
 #include <array>
 #include <cassert>
+#include <algorithm>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -17,9 +18,9 @@
 using namespace std;
 
 //stds
-std::mutex m;
-std::condition_variable space_available;
-std::condition_variable data_available;
+mutex m;
+condition_variable space_available;
+condition_variable data_available;
 
 
 // CONSTANTS
@@ -30,30 +31,38 @@ static const int NUM_CHANNELS = 3;
 static const unsigned NUM_PRODUCERS = 1;
 static const unsigned NUM_CONSUMERS = 10;
 
-static const unsigned BUFFER_SIZE = 1000;
-string buffer[BUFFER_SIZE];
-static unsigned counter = 0;
-unsigned in = 0, out = 0;
 
-void add_buffer(string i)
-{
-  buffer[in] = i;
-  in = (in+1) % BUFFER_SIZE;
-  counter++;
-}
+class buffer {
+    private:
+        string content[1000];
+        int in = 0; 
+        int out = 0;
+    public:
+        const unsigned BUFFER_SIZE = 1000;
+        unsigned counter = 0; 
 
-string get_buffer()
-{
-  string v;
-  v = buffer[out];
-  out = (out+1) % BUFFER_SIZE;
-  counter--;
-  return v;
-}
+        void add(string i) {
+            content[in] = i;
+            in = (in+1) % BUFFER_SIZE;
+            counter++;
+        }
+
+        string get() {
+            string v;
+            v = content[out];
+            out = (out+1) % BUFFER_SIZE;
+            counter--;
+            return v;
+        }
+
+        bool contains(string s) {
+            return std::find(std::begin(content), std::end(content), s) != std::end(content);
+        }
+};
+
+buffer imagesQueue, outputImages;
 
 static const unsigned SLEEP_TIME = 0; // ms
-
-
 typedef vector<vector<uint8_t>> single_channel_image_t;
 typedef array<single_channel_image_t, NUM_CHANNELS> image_t;
 
@@ -111,7 +120,6 @@ void write_image(const string &filename, const image_t &image)
     }
 }
 
-
 int average(const single_channel_image_t &image, int point_x, int point_y, int filter_size) {
     int pad = filter_size / 2;
     int accumulator = 0;
@@ -157,7 +165,7 @@ single_channel_image_t apply_box_blur(const single_channel_image_t &image, const
     return result;
 }
 
-void ProcessImage(string &input_image_path) {
+void blur_image(string &input_image_path) {
     image_t input_image = load_image(input_image_path);
     image_t output_image;
     for (int i = 0; i < NUM_CHANNELS; ++i)
@@ -168,12 +176,11 @@ void ProcessImage(string &input_image_path) {
     write_image(output_image_path, output_image);
 }
 
-int producer_func()
-{
+int set_pre_conditions() {
     if (!filesystem::exists(INPUT_DIRECTORY))
     {
         cerr << "Error, " << INPUT_DIRECTORY << " directory does not exist" << endl;
-        return 1;
+        return -1;
     }
 
     if (!filesystem::exists(OUTPUT_DIRECTORY))
@@ -181,32 +188,42 @@ int producer_func()
         if (!filesystem::create_directory(OUTPUT_DIRECTORY))
         {
             cerr << "Error creating" << OUTPUT_DIRECTORY << " directory" << endl;
-            return 1;
+            return -1;
         }
     }
 
     if (!filesystem::is_directory(OUTPUT_DIRECTORY))
     {
         cerr << "Error there is a file named " << OUTPUT_DIRECTORY << ", it should be a directory" << endl;
-        return 1;
+        return -1;
     }
+    return 0;
+}
+
+void set_images_queue_by( std::filesystem::__cxx11::directory_entry file) {
+    string input_image_path = file.path().string();
+    unique_lock<mutex> lock(m);
+    while (imagesQueue.counter == imagesQueue.BUFFER_SIZE)
+    {			
+        space_available.wait(lock); 
+    }
+    imagesQueue.add(input_image_path);
+}
+
+int producer_func()
+{
+    if (set_pre_conditions() < 0) return 1;
 	while (true)		
 	{
         auto start_time = chrono::high_resolution_clock::now();
         for (auto &file : filesystem::directory_iterator{INPUT_DIRECTORY})
         {
-            string input_image_path = file.path().string();
-            std::unique_lock<std::mutex> lock(m);
-            while (counter == BUFFER_SIZE)
-            {			
-                space_available.wait(lock); 
-            }
-            add_buffer(input_image_path);
+            set_images_queue_by(file);
         }
 		data_available.notify_one();
 		if (SLEEP_TIME > 0)
-			std::this_thread::sleep_for(std::chrono::milliseconds(SLEEP_TIME));
-		assert(counter <= BUFFER_SIZE);
+			this_thread::sleep_for(chrono::milliseconds(SLEEP_TIME));
+		assert(imagesQueue.counter <= imagesQueue.BUFFER_SIZE);
 	}
 }
 
@@ -215,21 +232,21 @@ void consumer_func(const unsigned id)
 {
 	while (true)
 	{
-		std::unique_lock<std::mutex> lock(m);
+		unique_lock<mutex> lock(m);
 		
-		while (counter == 0)
+		while (imagesQueue.counter == 0)
 		{
 			data_available.wait(lock);
 		}
 
-		string i = get_buffer();
-        ProcessImage(i);
+		string i = imagesQueue.get();
+        blur_image(i);
 
 		space_available.notify_one();
 		if (SLEEP_TIME > 0)
-			std::this_thread::sleep_for(std::chrono::milliseconds(SLEEP_TIME));
+			this_thread::sleep_for(chrono::milliseconds(SLEEP_TIME));
 
-		assert(counter >= 0);
+		assert(imagesQueue.counter >= 0);
     }
 }
 
